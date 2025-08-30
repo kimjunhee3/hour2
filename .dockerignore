@@ -20,6 +20,7 @@ venv/
 data/runtime/**
 runtime_cache.json
 schedule_index.json
+avg_cache.json
 
 # --- Seed data (include in image) ---
 !data/seed/**
