@@ -26,13 +26,23 @@ CACHE_DIR  = os.environ.get("CACHE_DIR", os.path.join(BASE_DIR, "data", "runtime
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+# 런타임 캐시 파일들
 RUNTIME_CACHE_FILE   = os.path.join(CACHE_DIR, "runtime_cache.json")
 SCHEDULE_CACHE_FILE  = os.path.join(CACHE_DIR, "schedule_index.json")
-AVG_CACHE_FILE       = os.path.join(CACHE_DIR, "avg_cache.json")            # ✅ 추가: 집계 캐시
+AVG_CACHE_FILE       = os.path.join(CACHE_DIR, "avg_cache.json")
 
+# 씨드(이미지에 포함) 기본 파일명
 SEED_RUNTIME_FILE    = os.path.join(DATA_DIR, "runtime_cache.seed.json")
 SEED_SCHEDULE_FILE   = os.path.join(DATA_DIR, "schedule_index.seed.json")
-SEED_AVG_FILE        = os.path.join(DATA_DIR, "avg_cache.seed.json")        # ✅ 추가
+SEED_AVG_FILE        = os.path.join(DATA_DIR, "avg_cache.seed.json")
+
+# 👉 업로드 JSON(plain 이름)도 자동 탐색: data/seed/ 와 레포 루트 모두
+SEED_PLAIN_RUNTIME_CANDIDATES  = [os.path.join(DATA_DIR, "runtime_cache.json"),
+                                  os.path.join(BASE_DIR, "runtime_cache.json")]
+SEED_PLAIN_SCHEDULE_CANDIDATES = [os.path.join(DATA_DIR, "schedule_index.json"),
+                                  os.path.join(BASE_DIR, "schedule_index.json")]
+SEED_PLAIN_AVG_CANDIDATES      = [os.path.join(DATA_DIR, "avg_cache.json"),
+                                  os.path.join(BASE_DIR, "avg_cache.json")]
 
 # ====== JSON 유틸 ======
 def _safe_json_load(path, default):
@@ -50,6 +60,14 @@ def _safe_json_save(path, obj):
         json.dump(obj, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
+def _merge_from_paths(paths):
+    merged = {}
+    for p in paths:
+        obj = _safe_json_load(p, {})
+        if isinstance(obj, dict) and obj:
+            merged.update(obj)
+    return merged
+
 def _file_info(path):
     if not os.path.exists(path):
         return {"exists": False}
@@ -63,19 +81,29 @@ def _file_info(path):
 
 # ====== 씨드 → 런타임 캐시 초기화 ======
 def _warm_cache_from_seed_if_empty():
-    # runtime 파일이 없을 때만 seed에서 복원
+    # runtime_cache.json
     if not os.path.exists(RUNTIME_CACHE_FILE):
+        merged = {}
         seed = _safe_json_load(SEED_RUNTIME_FILE, {})
-        if seed:
-            _safe_json_save(RUNTIME_CACHE_FILE, seed)
+        if isinstance(seed, dict): merged.update(seed)
+        merged.update(_merge_from_paths(SEED_PLAIN_RUNTIME_CANDIDATES))
+        if merged: _safe_json_save(RUNTIME_CACHE_FILE, merged)
+
+    # schedule_index.json
     if not os.path.exists(SCHEDULE_CACHE_FILE):
+        merged = {}
         seed = _safe_json_load(SEED_SCHEDULE_FILE, {})
-        if seed:
-            _safe_json_save(SCHEDULE_CACHE_FILE, seed)
+        if isinstance(seed, dict): merged.update(seed)
+        merged.update(_merge_from_paths(SEED_PLAIN_SCHEDULE_CANDIDATES))
+        if merged: _safe_json_save(SCHEDULE_CACHE_FILE, merged)
+
+    # avg_cache.json
     if not os.path.exists(AVG_CACHE_FILE):
+        merged = {}
         seed = _safe_json_load(SEED_AVG_FILE, {})
-        if seed:
-            _safe_json_save(AVG_CACHE_FILE, seed)
+        if isinstance(seed, dict): merged.update(seed)
+        merged.update(_merge_from_paths(SEED_PLAIN_AVG_CANDIDATES))
+        if merged: _safe_json_save(AVG_CACHE_FILE, merged)
 
 _warm_cache_from_seed_if_empty()
 
@@ -87,7 +115,7 @@ def get_schedule_cache():
     return _safe_json_load(SCHEDULE_CACHE_FILE, {})
 
 def get_avg_cache():
-    return _safe_json_load(AVG_CACHE_FILE, {})  # ✅
+    return _safe_json_load(AVG_CACHE_FILE, {})
 
 def set_runtime_cache(key, runtime_min):
     cache = get_runtime_cache()
@@ -108,12 +136,7 @@ def make_runtime_key(game_id: str, game_date: str) -> str:
     return f"{game_id}_{game_date}"
 
 def make_avg_key(team: str, rivals_set, start_date: str) -> str:
-    # 집계 캐시 키: 팀 + 라이벌 시그니처 + 시작일
-    if not rivals_set:
-        sig = "ALL"
-    else:
-        sig = ",".join(sorted(rivals_set))
-    # start_date 포맷 통일
+    sig = "ALL" if not rivals_set else ",".join(sorted(rivals_set))
     sd = start_date.replace("-", "")
     return f"{team}|{sig}|{sd}"
 
@@ -179,8 +202,7 @@ def find_today_matches_for_team(driver, my_team):
     for li in cards:
         info = extract_match_info_from_card(li)
         h, a = info["home"], info["away"]
-        if not (h and a):
-            continue
+        if not (h and a): continue
         if my_team in {h, a}:
             rival = h if a == my_team else a
             info["rival"] = rival
@@ -215,7 +237,7 @@ def get_games_for_date(driver, date_str):
     set_schedule_cache_for_date(date_str, out)
     return out
 
-# ====== 리뷰 런타임 ======
+# ====== 리뷰 러닝타임 ======
 def open_review_and_get_runtime(driver, game_id, game_date):
     today_str = datetime.today().strftime("%Y%m%d")
     use_cache = (game_date != today_str)
@@ -258,7 +280,7 @@ def open_review_and_get_runtime(driver, game_id, game_date):
         set_runtime_cache(key, run_time_min)
     return run_time_min
 
-# ====== 평균 계산: 캐시 우선 + 부족분만 보충 ======
+# ====== 스케줄 커버리지 보장(필요할 때만 Selenium 호출) ======
 def _date_range_list(start_date: str, end_date: str):
     if "-" in start_date:
         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
@@ -268,7 +290,6 @@ def _date_range_list(start_date: str, end_date: str):
     return [dt.strftime("%Y%m%d") for dt in pd.date_range(start=start_dt, end=end_dt)]
 
 def _gather_games_from_schedule_cache(team_name, rivals_set, dates):
-    """스케줄 캐시에서만 읽어, 대상 경기 목록 추출"""
     sch = get_schedule_cache()
     targets = []
     for d in dates:
@@ -286,66 +307,82 @@ def _gather_games_from_schedule_cache(team_name, rivals_set, dates):
     return targets
 
 def _collect_runtime_from_runtime_cache(games):
-    """런타임 캐시에서만 읽어 즉시 구할 수 있는 분수 리스트와, 미해결 게임 목록 반환"""
     rc = get_runtime_cache()
-    have = []
-    missing = []
+    have, missing = [], []
     today_str = datetime.today().strftime("%Y%m%d")
     for g in games:
         k = make_runtime_key(g["g_id"], g["g_dt"])
         hit = rc.get(k)
-        # 오늘 경기는 리뷰가 없어 캐시를 안 씀
         if g["g_dt"] == today_str:
-            missing.append(g)
+            missing.append(g)  # 오늘 경기는 리뷰 미게시 가능성
         elif hit and "runtime_min" in hit:
             have.append(hit["runtime_min"])
         else:
             missing.append(g)
     return have, missing
 
+def _ensure_schedule_coverage(dates, driver=None):
+    created = False
+    sch = get_schedule_cache()
+    missing = [d for d in dates if d not in sch]
+    if not missing:
+        return
+    if driver is None:
+        driver = make_driver()
+        created = True
+    for dt in missing:
+        try:
+            get_games_for_date(driver, dt)
+        except Exception:
+            # 날짜 하나 실패해도 계속
+            continue
+    if created:
+        try: driver.quit()
+        except: pass
+
+# ====== 평균 계산: 캐시 우선 + 부족분 Selenium 보충 ======
 def collect_history_avg_runtime(team_name, rival_set, start_date=START_DATE):
-    # 1) 날짜 리스트
     yesterday = (datetime.today() - timedelta(days=1)).strftime("%Y%m%d")
     dates = _date_range_list(start_date, yesterday)
 
-    # 2) 스케줄 캐시에서 대상 경기 목록 수집
+    # 1) 스케줄 캐시만으로 시도
     targets = _gather_games_from_schedule_cache(team_name, rival_set, dates)
 
-    # 3) 런타임 캐시에서 먼저 긁기
+    # 2) 비어있으면 필요한 날짜만 Selenium으로 채움
+    if not targets:
+        _ensure_schedule_coverage(dates)  # 내부에서 필요 시 드라이버 생성/해제
+        targets = _gather_games_from_schedule_cache(team_name, rival_set, dates)
+
+    # 3) 러닝타임 캐시 먼저
     have, missing = _collect_runtime_from_runtime_cache(targets)
 
-    # 4) 미해결이 없으면 드라이버 생성 불필요 (✅ 큰 개선 포인트)
-    if not missing:
-        if have:
-            return round(sum(have)/len(have), 1), have
-        return None, []
+    # 4) 없는 경기만 리뷰 탭 접근
+    if missing:
+        d = make_driver()
+        try:
+            # 혹시 스케줄이 더 필요한 날짜가 있다면 보강
+            need_dates = sorted({g["g_dt"] for g in missing if g.get("g_dt")})
+            for dt in need_dates:
+                if dt not in get_schedule_cache():
+                    get_games_for_date(d, dt)
 
-    # 5) 스케줄 캐시에 없는 날짜가 있을 수도 있으니, 필요한 날짜만 최소 보충
-    need_dates = sorted({g["g_dt"] for g in missing if g.get("g_dt")})
-    d = make_driver()
-    try:
-        # 스케줄 캐시 비어있던 날짜 보충
-        for dt in need_dates:
-            if dt not in get_schedule_cache():
-                get_games_for_date(d, dt)
+            # 다시 대상/미싱 계산
+            targets = _gather_games_from_schedule_cache(team_name, rival_set, dates)
+            have, missing = _collect_runtime_from_runtime_cache(targets)
 
-        # 다시 타겟 추출 후 런타임 미해결만 리뷰 페이지 접근
-        targets = _gather_games_from_schedule_cache(team_name, rival_set, dates)
-        have, missing = _collect_runtime_from_runtime_cache(targets)
-
-        for g in missing:
-            try:
-                rt = open_review_and_get_runtime(d, g["g_id"], g["g_dt"])
-            except Exception:
-                rt = None
-            if rt is not None:
-                have.append(rt)
-    finally:
-        try: d.quit()
-        except: pass
+            for g in missing:
+                try:
+                    rt = open_review_and_get_runtime(d, g["g_id"], g["g_dt"])
+                except Exception:
+                    rt = None
+                if rt is not None:
+                    have.append(rt)
+        finally:
+            try: d.quit()
+            except: pass
 
     if have:
-        return round(sum(have)/len(have), 1), have
+        return round(sum(have) / len(have), 1), have
     return None, []
 
 # ====== 공통 처리 ======
@@ -354,7 +391,7 @@ def compute_for_team(team_name):
         return dict(result="팀을 선택해주세요.", avg_time=None, css_class="", msg="",
                     selected_team=None, top30=top30, avg_ref=avg_ref, bottom70=bottom70)
 
-    # 오늘 매치업 탐색 (이건 드라이버 필요)
+    # 오늘 매치업: 이 단계는 드라이버 필요
     d = make_driver()
     try:
         today_matches = find_today_matches_for_team(d, team_name)
@@ -370,22 +407,23 @@ def compute_for_team(team_name):
     rivals_today = {m["rival"] for m in today_matches if m.get("rival")}
     rivals_str = ", ".join(sorted(rivals_today)) if rivals_today else ""
 
-    # ✅ 집계 캐시 먼저 확인
+    # 집계 캐시 먼저
     avg_key = make_avg_key(team_name, rivals_today, START_DATE)
     avg_cache = get_avg_cache()
-    if avg_key in avg_cache and "avg_time" in avg_cache[avg_key]:
+    if avg_key in avg_cache and "avg_time" in avg_cache[avg_key] and avg_cache[avg_key]["avg_time"] is not None:
         avg_time = avg_cache[avg_key]["avg_time"]
     else:
-        # 부족하면 계산 후 집계 캐시에 저장
         try:
             avg_time, samples = collect_history_avg_runtime(team_name, rivals_today)
         except Exception:
             avg_time, samples = None, []
-        set_avg_cache(avg_key, {
-            "avg_time": avg_time,
-            "n_samples": len(samples),
-            "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        })
+        # 실패(None)는 캐시에 저장하지 않음 (오염 방지)
+        if avg_time is not None and samples:
+            set_avg_cache(avg_key, {
+                "avg_time": avg_time,
+                "n_samples": len(samples),
+                "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
 
     css_class = ""; msg = ""
     if avg_time is not None:
@@ -427,10 +465,15 @@ def cache_status():
         "CACHE_DIR": os.path.abspath(CACHE_DIR),
         "runtime_cache": _file_info(RUNTIME_CACHE_FILE),
         "schedule_cache": _file_info(SCHEDULE_CACHE_FILE),
-        "avg_cache": _file_info(AVG_CACHE_FILE),                # ✅
+        "avg_cache": _file_info(AVG_CACHE_FILE),
         "seed_runtime": _file_info(SEED_RUNTIME_FILE),
         "seed_schedule": _file_info(SEED_SCHEDULE_FILE),
-        "seed_avg": _file_info(SEED_AVG_FILE),                  # ✅
+        "seed_avg": _file_info(SEED_AVG_FILE),
+        "seed_plain_candidates": {
+            "runtime": [ _file_info(p) for p in SEED_PLAIN_RUNTIME_CANDIDATES ],
+            "schedule": [ _file_info(p) for p in SEED_PLAIN_SCHEDULE_CANDIDATES ],
+            "avg": [ _file_info(p) for p in SEED_PLAIN_AVG_CANDIDATES ],
+        }
     })
 
 @app.route("/cache/clear", methods=["POST"])
@@ -450,12 +493,12 @@ def cache_clear():
 def cache_export():
     runtime = _safe_json_load(RUNTIME_CACHE_FILE, {})
     schedule= _safe_json_load(SCHEDULE_CACHE_FILE, {})
-    avg     = _safe_json_load(AVG_CACHE_FILE, {})              # ✅
+    avg     = _safe_json_load(AVG_CACHE_FILE, {})
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("runtime_cache.seed.json", json.dumps(runtime, ensure_ascii=False, indent=2))
         z.writestr("schedule_index.seed.json", json.dumps(schedule, ensure_ascii=False, indent=2))
-        z.writestr("avg_cache.seed.json", json.dumps(avg, ensure_ascii=False, indent=2))  # ✅
+        z.writestr("avg_cache.seed.json", json.dumps(avg, ensure_ascii=False, indent=2))
     mem.seek(0)
     resp = make_response(mem.read())
     resp.headers["Content-Type"] = "application/zip"
@@ -486,7 +529,7 @@ def cache_import():
         _safe_json_save(SCHEDULE_CACHE_FILE, payload["schedule"])
         _safe_json_save(SEED_SCHEDULE_FILE, payload["schedule"])
         applied["schedule"] = True
-    if isinstance(payload, dict) and "avg" in payload:          # ✅
+    if isinstance(payload, dict) and "avg" in payload:
         _safe_json_save(AVG_CACHE_FILE, payload["avg"])
         _safe_json_save(SEED_AVG_FILE, payload["avg"])
         applied["avg"] = True
