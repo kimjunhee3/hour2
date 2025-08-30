@@ -18,21 +18,48 @@ avg_ref = 182.7
 bottom70= 194
 START_DATE = os.environ.get("START_DATE", "2025-03-22")
 
+# ====== 팀 별칭 → 정규화 매핑 ======
+def _norm_key(s: str) -> str:
+    return re.sub(r'[\s\-_\/]+', '', (s or '').strip().lower())
+
+_ALIAS = {
+    'SSG': ['SSG','SSG랜더스','SSG 랜더스','랜더스','ssg landers','landers','sk','sk와이번스','sk 와이번스','와이번스'],
+    'KIA': ['KIA','kia','기아','KIA타이거즈','KIA 타이거즈','타이거즈'],
+    '한화': ['한화','한화이글스','한화 이글스','이글스','hanwha','hanhwa'],
+    '롯데': ['롯데','롯데자이언츠','롯데 자이언츠','자이언츠','lotte'],
+    '두산': ['두산','두산베어스','두산 베어스','베어스','doosan'],
+    'LG'  : ['LG','lg','엘지','LG트윈스','LG 트윈스','트윈스'],
+    '삼성': ['삼성','삼성라이온즈','삼성 라이온즈','라이온즈','samsung'],
+    'KT'  : ['KT','kt','KT위즈','KT 위즈','위즈'],
+    'NC'  : ['NC','nc','NC다이노스','NC 다이노스','다이노스'],
+    '키움': ['키움','키움히어로즈','키움 히어로즈','히어로즈','넥센','넥센히어로즈','넥센 히어로즈','heroes','kiwoom'],
+}
+ALIAS_TO_CANON = { _norm_key(n): canon for canon, names in _ALIAS.items() for n in names }
+
+def canon_team(s: str) -> str | None:
+    if not s: return None
+    return ALIAS_TO_CANON.get(_norm_key(s), s.strip())
+
 # ====== 경로 ======
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR   = os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data", "seed"))
 CACHE_DIR  = os.environ.get("CACHE_DIR", os.path.join(BASE_DIR, "data", "runtime"))
-
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# 런타임 캐시 파일들(실제 읽고/쓰는 대상)
+# 런타임 캐시 파일 경로(실제 읽고/쓰는 대상)
 RUNTIME_CACHE_FILE   = os.path.join(CACHE_DIR, "runtime_cache.json")
 SCHEDULE_CACHE_FILE  = os.path.join(CACHE_DIR, "schedule_index.json")
 
-# 깃허브에 커밋해서 이미지에 포함할 씨드(두 개만 사용)
-SEED_RUNTIME_FILE    = os.path.join(DATA_DIR, "runtime_cache.json")
-SEED_SCHEDULE_FILE   = os.path.join(DATA_DIR, "schedule_index.json")
+# 씨드 파일 후보(둘 다 지원)
+SEED_RUNTIME_CANDIDATES  = [
+    os.path.join(DATA_DIR, "runtime_cache.json"),
+    os.path.join(DATA_DIR, "runtime_cache.seed.json"),
+]
+SEED_SCHEDULE_CANDIDATES = [
+    os.path.join(DATA_DIR, "schedule_index.json"),
+    os.path.join(DATA_DIR, "schedule_index.seed.json"),
+]
 
 # ====== JSON 유틸 ======
 def _safe_json_load(path, default):
@@ -50,6 +77,12 @@ def _safe_json_save(path, obj):
         json.dump(obj, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
+def _first_existing(paths):
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    return None
+
 def _file_info(path):
     if not os.path.exists(path):
         return {"exists": False}
@@ -61,40 +94,43 @@ def _file_info(path):
         "path": os.path.abspath(path),
     }
 
-# ====== 씨드 → 런타임 캐시 초기화 (두 파일만) ======
-def _warm_cache_from_seed_if_empty():
-    if not os.path.exists(RUNTIME_CACHE_FILE):
-        seed_runtime = _safe_json_load(SEED_RUNTIME_FILE, {})
-        if isinstance(seed_runtime, dict) and seed_runtime:
-            _safe_json_save(RUNTIME_CACHE_FILE, seed_runtime)
-        else:
-            _safe_json_save(RUNTIME_CACHE_FILE, {})  # 빈 파일이라도 생성
+# ====== 메모리 캐시 ======
+RUNTIME_MEM = None
+SCHEDULE_MEM = None
 
-    if not os.path.exists(SCHEDULE_CACHE_FILE):
-        seed_schedule = _safe_json_load(SEED_SCHEDULE_FILE, {})
-        if isinstance(seed_schedule, dict) and seed_schedule:
-            _safe_json_save(SCHEDULE_CACHE_FILE, seed_schedule)
-        else:
-            _safe_json_save(SCHEDULE_CACHE_FILE, {})
+def _warm_cache_from_seed_if_empty():
+    global RUNTIME_MEM, SCHEDULE_MEM
+
+    # 런타임 캐시 파일 → 메모리 로드 (있으면 그걸 우선)
+    RUNTIME_MEM = _safe_json_load(RUNTIME_CACHE_FILE, None)
+    if not isinstance(RUNTIME_MEM, dict):
+        # 없으면 씨드 후보에서 로드
+        seedp = _first_existing(SEED_RUNTIME_CANDIDATES)
+        RUNTIME_MEM = _safe_json_load(seedp, {})
+        _safe_json_save(RUNTIME_CACHE_FILE, RUNTIME_MEM)
+
+    SCHEDULE_MEM = _safe_json_load(SCHEDULE_CACHE_FILE, None)
+    if not isinstance(SCHEDULE_MEM, dict):
+        seedp = _first_existing(SEED_SCHEDULE_CANDIDATES)
+        SCHEDULE_MEM = _safe_json_load(seedp, {})
+        _safe_json_save(SCHEDULE_CACHE_FILE, SCHEDULE_MEM)
 
 _warm_cache_from_seed_if_empty()
 
-# ====== 캐시 Accessor ======
+# === 메모리 캐시에 접근 ===
 def get_runtime_cache():
-    return _safe_json_load(RUNTIME_CACHE_FILE, {})
+    return RUNTIME_MEM
 
 def get_schedule_cache():
-    return _safe_json_load(SCHEDULE_CACHE_FILE, {})
+    return SCHEDULE_MEM
 
 def set_runtime_cache(key, runtime_min):
-    cache = get_runtime_cache()
-    cache[key] = {"runtime_min": runtime_min}
-    _safe_json_save(RUNTIME_CACHE_FILE, cache)
+    RUNTIME_MEM[key] = {"runtime_min": runtime_min}
+    _safe_json_save(RUNTIME_CACHE_FILE, RUNTIME_MEM)
 
 def set_schedule_cache_for_date(date_str, games_minimal_list):
-    cache = get_schedule_cache()
-    cache[date_str] = games_minimal_list
-    _safe_json_save(SCHEDULE_CACHE_FILE, cache)
+    SCHEDULE_MEM[date_str] = games_minimal_list
+    _safe_json_save(SCHEDULE_CACHE_FILE, SCHEDULE_MEM)
 
 def make_runtime_key(game_id: str, game_date: str) -> str:
     return f"{game_id}_{game_date}"
@@ -113,67 +149,11 @@ def make_driver():
     options.page_load_strategy = "eager"
     return webdriver.Chrome(options=options)
 
-# ====== 오늘 카드 ======
-def get_today_cards(driver):
-    wait = WebDriverWait(driver, 15)
-    today = datetime.today().strftime("%Y%m%d")
-    url = f"https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}"
-    driver.get(url)
-    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div#contents")))
-    time.sleep(0.4)
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-    return soup.select("li.game-cont") or soup.select("li[class*='game-cont']")
-
-def extract_match_info_from_card(card_li):
-    home_nm = card_li.get("home_nm")
-    away_nm = card_li.get("away_nm")
-    g_id = card_li.get("g_id")
-    g_dt = card_li.get("g_dt")
-
-    if not (home_nm and away_nm):
-        home_alt = card_li.select_one(".team.home .emb img")
-        away_alt = card_li.select_one(".team.away .emb img")
-        if away_alt and not away_nm: away_nm = (away_alt.get("alt") or "").strip() or None
-        if home_alt and not home_nm: home_nm = (home_alt.get("alt") or "").strip() or None
-
-    if not (home_nm and away_nm):
-        txt = card_li.get_text(" ", strip=True)
-        m = re.search(r"([A-Za-z가-힣]+)\s*vs\s*([A-Za-z가-힣]+)", txt, re.I)
-        if m:
-            a, b = m.group(1), m.group(2)
-            away_nm = away_nm or a
-            home_nm = home_nm or b
-
-    if not (g_id and g_dt):
-        a = card_li.select_one("a[href*='GameCenter/Main.aspx'][href*='gameId='][href*='gameDate=']")
-        if a and a.has_attr("href"):
-            href = a["href"]
-            gm = re.search(r"gameId=([A-Z0-9]+)", href)
-            dm = re.search(r"gameDate=(\d{8})", href)
-            if gm: g_id = g_id or gm.group(1)
-            if dm: g_dt = g_dt or dm.group(1)
-
-    return {"home": home_nm, "away": away_nm, "g_id": g_id, "g_dt": g_dt}
-
-def find_today_matches_for_team(driver, my_team):
-    cards = get_today_cards(driver)
-    results = []
-    for li in cards:
-        info = extract_match_info_from_card(li)
-        h, a = info["home"], info["away"]
-        if not (h and a):
-            continue
-        if my_team in {h, a}:
-            rival = h if a == my_team else a
-            info["rival"] = rival
-            results.append(info)
-    return results
-
-# ====== 날짜 스케줄(최소필드 캐시) ======
+# ====== 날짜 스케줄 긁기(한 날짜) ======
 def get_games_for_date(driver, date_str):
-    cache = get_schedule_cache()
-    if date_str in cache:
-        return cache[date_str]
+    # 캐시에 있으면 바로 반환
+    if date_str in SCHEDULE_MEM:
+        return SCHEDULE_MEM[date_str]
 
     wait = WebDriverWait(driver, 15)
     url = f"https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={date_str}"
@@ -188,14 +168,50 @@ def get_games_for_date(driver, date_str):
     soup = BeautifulSoup(driver.page_source, "html.parser")
     cards = soup.select("li.game-cont") or soup.select("li[class*='game-cont']")
 
+    def extract(li):
+        home_nm = li.get("home_nm")
+        away_nm = li.get("away_nm")
+        g_id    = li.get("g_id")
+        g_dt    = li.get("g_dt")
+
+        if not (home_nm and away_nm):
+            home_alt = li.select_one(".team.home .emb img")
+            away_alt = li.select_one(".team.away .emb img")
+            if away_alt and not away_nm: away_nm = (away_alt.get("alt") or "").strip() or None
+            if home_alt and not home_nm: home_nm = (home_alt.get("alt") or "").strip() or None
+
+        if not (g_id and g_dt):
+            a = li.select_one("a[href*='GameCenter/Main.aspx'][href*='gameId='][href*='gameDate=']")
+            if a and a.has_attr("href"):
+                href = a["href"]
+                gm = re.search(r"gameId=([A-Z0-9]+)", href)
+                dm = re.search(r"gameDate=(\d{8})", href)
+                if gm: g_id = g_id or gm.group(1)
+                if dm: g_dt = g_dt or dm.group(1)
+
+        return {"home": home_nm, "away": away_nm, "g_id": g_id, "g_dt": g_dt}
+
     out = []
     for li in cards:
-        info = extract_match_info_from_card(li)
+        info = extract(li)
         if all([info.get("home"), info.get("away"), info.get("g_id"), info.get("g_dt")]):
-            out.append({"home": info["home"], "away": info["away"], "g_id": info["g_id"], "g_dt": info["g_dt"]})
+            out.append(info)
 
     set_schedule_cache_for_date(date_str, out)
     return out
+
+# ====== 스케줄 보장: 필요한 날짜만 보충 ======
+def ensure_schedule_for_dates(dates):
+    missing = [d for d in dates if d not in SCHEDULE_MEM]
+    if not missing:
+        return
+    d = make_driver()
+    try:
+        for dt in missing:
+            get_games_for_date(d, dt)
+    finally:
+        try: d.quit()
+        except: pass
 
 # ====== 리뷰 런타임 ======
 def open_review_and_get_runtime(driver, game_id, game_date):
@@ -204,9 +220,8 @@ def open_review_and_get_runtime(driver, game_id, game_date):
     key = make_runtime_key(game_id, game_date)
 
     if use_cache:
-        rc = get_runtime_cache()
-        hit = rc.get(key)
-        if hit and isinstance(hit, dict) and "runtime_min" in hit:
+        hit = RUNTIME_MEM.get(key)
+        if hit and "runtime_min" in hit:
             return hit["runtime_min"]
 
     wait = WebDriverWait(driver, 12)
@@ -240,73 +255,81 @@ def open_review_and_get_runtime(driver, game_id, game_date):
         set_runtime_cache(key, run_time_min)
     return run_time_min
 
-# ====== 평균 계산 (단순: 캐시 우선, 없으면 그때만 Selenium) ======
+# ====== 오늘 매치업: 캐시 우선 ======
+def find_today_matches_for_team_from_cache(my_team):
+    my_can = canon_team(my_team)
+    today = datetime.today().strftime("%Y%m%d")
+    games = SCHEDULE_MEM.get(today, [])
+    results = []
+    for g in games:
+        h_can, a_can = canon_team(g["home"]), canon_team(g["away"])
+        if my_can in {h_can, a_can}:
+            rival = h_can if a_can == my_can else a_can
+            info = dict(g)
+            info["rival"] = rival
+            results.append(info)
+    return results
+
+# ====== 평균 계산 (캐시 우선, 부족분만 Selenium) ======
 def collect_history_avg_runtime(my_team, rival_set, start_date=START_DATE):
-    # 날짜 목록: START_DATE ~ 어제
+    my_can = canon_team(my_team)
     yesterday = (datetime.today() - timedelta(days=1)).strftime("%Y%m%d")
+
     if "-" in start_date:
         start_dt = datetime.strptime(start_date, "%Y-%m-%d")
     else:
         start_dt = datetime.strptime(start_date, "%Y%m%d")
     dates = [dt.strftime("%Y%m%d") for dt in pd.date_range(start=start_dt, end=datetime.strptime(yesterday, "%Y%m%d"))]
 
-    # 1) 스케줄 캐시만으로 먼저 시도
-    sch = get_schedule_cache()
+    # 1) 스케줄 캐시에서 대상 경기 수집
     targets = []
     for d in dates:
-        games = sch.get(d)
-        if not games:
-            continue
-        for g in games:
-            if my_team not in {g["home"], g["away"]}:
+        for g in SCHEDULE_MEM.get(d, []):
+            h_can, a_can = canon_team(g["home"]), canon_team(g["away"])
+            if my_can not in {h_can, a_can}:
                 continue
-            opp = g["home"] if g["away"] == my_team else g["away"]
-            if rival_set and opp not in rival_set:
+            opp_can = h_can if a_can == my_can else a_can
+            if rival_set and opp_can not in {canon_team(x) for x in rival_set}:
                 continue
             targets.append(g)
 
-    # 2) 스케줄이 하나도 없으면 그때만 Selenium으로 채움
-    driver = None
-    created = False
+    # 2) 전혀 없으면 필요한 날짜만 보충
     if not targets:
-        driver = make_driver(); created = True
+        ensure_schedule_for_dates(dates)
         for d in dates:
-            get_games_for_date(driver, d)  # 내부에서 캐시 미스만 네트워크 접근
-        # 다시 타겟 구성
-        sch = get_schedule_cache()
-        for d in dates:
-            for g in sch.get(d, []):
-                if my_team not in {g["home"], g["away"]}:
+            for g in SCHEDULE_MEM.get(d, []):
+                h_can, a_can = canon_team(g["home"]), canon_team(g["away"])
+                if my_can not in {h_can, a_can}:
                     continue
-                opp = g["home"] if g["away"] == my_team else g["away"]
-                if rival_set and opp not in rival_set:
+                opp_can = h_can if a_can == my_can else a_can
+                if rival_set and opp_can not in {canon_team(x) for x in rival_set}:
                     continue
                 targets.append(g)
 
-    # 3) 런타임 캐시 먼저, 없으면 그때만 리뷰 탭 접근
-    run_times = []
-    # 먼저 캐시 조회
-    rc = get_runtime_cache()
+    # 3) 런타임 캐시 먼저, 없으면 리뷰 탭 접근
+    run_times, missing = [], []
     today_str = datetime.today().strftime("%Y%m%d")
-    missing = []
     for g in targets:
         key = make_runtime_key(g["g_id"], g["g_dt"])
-        if g["g_dt"] != today_str and key in rc and "runtime_min" in rc[key]:
-            run_times.append(rc[key]["runtime_min"])
+        hit = RUNTIME_MEM.get(key)
+        if g["g_dt"] != today_str and hit and "runtime_min" in hit:
+            run_times.append(hit["runtime_min"])
         else:
             missing.append(g)
 
     if missing:
-        if driver is None:
-            driver = make_driver(); created = True
-        for g in missing:
-            rt = open_review_and_get_runtime(driver, g["g_id"], g["g_dt"])
-            if rt is not None:
-                run_times.append(rt)
-
-    if created and driver is not None:
-        try: driver.quit()
-        except: pass
+        d = make_driver()
+        try:
+            # 혹시 스케줄 비어있는 날짜가 있으면 보충
+            need_dates = sorted({g["g_dt"] for g in missing if g.get("g_dt")})
+            ensure_schedule_for_dates(need_dates)
+            for g in missing:
+                rt = open_review_and_get_runtime(d, g["g_id"], g["g_dt"])
+                if rt is not None:
+                    run_times.append(rt)
+        finally:
+            try: d.quit()
+            except: pass
 
     if run_times:
         return round(sum(run_times) / len(run_times), 1), run_times
@@ -318,24 +341,26 @@ def compute_for_team(team_name):
         return dict(result="팀을 선택해주세요.", avg_time=None, css_class="", msg="",
                     selected_team=None, top30=top30, avg_ref=avg_ref, bottom70=bottom70)
 
-    # 오늘 매치업 확인 (이 단계는 드라이버 필요)
-    d = make_driver()
-    try:
-        today_matches = find_today_matches_for_team(d, team_name)
-    finally:
-        try: d.quit()
-        except: pass
+    selected_can = canon_team(team_name)
+
+    # 오늘 매치업: 캐시 우선
+    today_matches = find_today_matches_for_team_from_cache(selected_can)
+    if not today_matches:
+        # 오늘 날짜만 보충
+        today = datetime.today().strftime("%Y%m%d")
+        ensure_schedule_for_dates([today])
+        today_matches = find_today_matches_for_team_from_cache(selected_can)
 
     if not today_matches:
-        return dict(result=f"{team_name}의 오늘 경기를 찾지 못했습니다.",
+        return dict(result=f"{selected_can}의 오늘 경기를 찾지 못했습니다.",
                     avg_time=None, css_class="", msg="",
-                    selected_team=team_name, top30=top30, avg_ref=avg_ref, bottom70=bottom70)
+                    selected_team=selected_can, top30=top30, avg_ref=avg_ref, bottom70=bottom70)
 
     rivals_today = {m["rival"] for m in today_matches if m.get("rival")}
     rivals_str = ", ".join(sorted(rivals_today)) if rivals_today else ""
 
     try:
-        avg_time, _ = collect_history_avg_runtime(team_name, rivals_today)
+        avg_time, _ = collect_history_avg_runtime(selected_can, rivals_today)
     except Exception:
         avg_time = None
 
@@ -345,12 +370,12 @@ def compute_for_team(team_name):
         elif avg_time < avg_ref:    css_class, msg = "normal", "일반적인 경기 소요 시간입니다"
         elif avg_time < bottom70:   css_class, msg = "bit-long", "조금 긴 편이에요"
         else:                       css_class, msg = "long", "시간 오래 걸리는 매치업입니다"
-        result = f"오늘 {team_name}의 상대팀은 {rivals_str}입니다.<br>과거 {team_name} vs {rivals_str} 평균 경기시간: {avg_time}분"
+        result = f"오늘 {selected_can}의 상대팀은 {rivals_str}입니다.<br>과거 {selected_can} vs {rivals_str} 평균 경기시간: {avg_time}분"
     else:
-        result = f"오늘 {team_name}의 상대팀은 {rivals_str}입니다.<br>과거 경기 데이터가 없습니다."
+        result = f"오늘 {selected_can}의 상대팀은 {rivals_str}입니다.<br>과거 경기 데이터가 없습니다."
 
     return dict(result=result, avg_time=avg_time, css_class=css_class, msg=msg,
-                selected_team=team_name, top30=top30, avg_ref=avg_ref, bottom70=bottom70)
+                selected_team=selected_can, top30=top30, avg_ref=avg_ref, bottom70=bottom70)
 
 # ====== 라우트 ======
 @app.route("/", methods=["GET","POST"])
@@ -379,12 +404,19 @@ def cache_status():
         "CACHE_DIR": os.path.abspath(CACHE_DIR),
         "runtime_cache": _file_info(RUNTIME_CACHE_FILE),
         "schedule_cache": _file_info(SCHEDULE_CACHE_FILE),
-        "seed_runtime": _file_info(SEED_RUNTIME_FILE),
-        "seed_schedule": _file_info(SEED_SCHEDULE_FILE),
+        "seed_candidates": {
+            "runtime": [ _file_info(p) for p in SEED_RUNTIME_CANDIDATES ],
+            "schedule": [ _file_info(p) for p in SEED_SCHEDULE_CANDIDATES ],
+        },
+        "mem_sizes": {
+            "runtime_keys": len(RUNTIME_MEM or {}),
+            "schedule_days": len(SCHEDULE_MEM or {}),
+        },
     })
 
 @app.route("/cache/clear", methods=["POST"])
 def cache_clear():
+    global RUNTIME_MEM, SCHEDULE_MEM
     deleted = []
     for p in [RUNTIME_CACHE_FILE, SCHEDULE_CACHE_FILE]:
         if os.path.exists(p):
@@ -398,12 +430,10 @@ def cache_clear():
 # ====== 씨드 Export (선택) ======
 @app.route("/cache/export")
 def cache_export():
-    runtime = _safe_json_load(RUNTIME_CACHE_FILE, {})
-    schedule= _safe_json_load(SCHEDULE_CACHE_FILE, {})
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("runtime_cache.json", json.dumps(runtime, ensure_ascii=False, indent=2))
-        z.writestr("schedule_index.json", json.dumps(schedule, ensure_ascii=False, indent=2))
+        z.writestr("runtime_cache.json", json.dumps(get_runtime_cache(), ensure_ascii=False, indent=2))
+        z.writestr("schedule_index.json", json.dumps(get_schedule_cache(), ensure_ascii=False, indent=2))
     mem.seek(0)
     resp = make_response(mem.read())
     resp.headers["Content-Type"] = "application/zip"
