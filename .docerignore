@@ -1,0 +1,25 @@
+# --- Python cache ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# --- Env / IDE / VCS ---
+.env
+.vscode/
+.idea/
+.git/
+.gitignore
+
+# --- Virtualenv ---
+.venv/
+venv/
+
+# --- Runtime caches (exclude from image) ---
+data/runtime/**
+runtime_cache.json
+schedule_index.json
+
+# --- Seed data (include in image) ---
+!data/seed/**
