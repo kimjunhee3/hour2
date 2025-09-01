@@ -389,6 +389,9 @@ def compute_for_team(team_name, asof: str | None = None):
 
     selected_can = canon_team(team_name)
     ref = _asof_or_today(asof)
+    is_today = (ref == datetime.today().strftime("%Y%m%d"))
+    no_game_text = (f"오늘 {selected_can}의 경기가 없습니다."
+                    if is_today else f"{ref} {selected_can} 경기가 없습니다.")
 
     # as-of 날짜의 매치업을 캐시에서 찾기
     today_matches = find_today_matches_for_team_from_cache(selected_can, ref)
@@ -400,8 +403,7 @@ def compute_for_team(team_name, asof: str | None = None):
             today_matches = find_today_matches_for_team_from_cache(selected_can, ref)
 
     if not today_matches:
-        # 문구: as-of 날짜 기준으로 통일
-        return dict(result=f"{selected_can}의 {ref} 경기 정보가 없습니다.",
+        return dict(result=no_game_text,
                     avg_time=None, css_class="", msg="",
                     selected_team=selected_can, top30=top30, avg_ref=avg_ref, bottom70=bottom70)
 
@@ -421,8 +423,8 @@ def compute_for_team(team_name, asof: str | None = None):
         else:                       css_class, msg = "long", "시간 오래 걸리는 매치업입니다"
         result = f"{ref} {selected_can}의 상대팀은 {rivals_str}입니다.<br>과거 {selected_can} vs {rivals_str} 평균 경기시간: {avg_time}분"
     else:
-        # 평균이 없으면 문구 통일(요청사항 반영)
-        result = f"{ref} {selected_can} 경기가 없습니다."
+        # 평균이 없으면 문구 통일
+        result = no_game_text
 
     return dict(result=result, avg_time=avg_time, css_class=css_class, msg=msg,
                 selected_team=selected_can, top30=top30, avg_ref=avg_ref, bottom70=bottom70)
