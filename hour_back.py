@@ -388,7 +388,7 @@ def compute_for_team(team_name):
         else:                       css_class, msg = "long", "시간 오래 걸리는 매치업입니다"
         result = f"오늘 {selected_can}의 상대팀은 {rivals_str}입니다.<br>과거 {selected_can} vs {rivals_str} 평균 경기시간: {avg_time}분"
     else:
-        result = f"오늘 {selected_can}의 상대팀은 {rivals_str}입니다.<br>과거 경기 데이터가 없습니다."
+        result = f"오늘 {selected_can} 경기가 없습니다."
 
     return dict(result=result, avg_time=avg_time, css_class=css_class, msg=msg,
                 selected_team=selected_can, top30=top30, avg_ref=avg_ref, bottom70=bottom70)
