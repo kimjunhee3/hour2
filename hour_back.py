@@ -368,7 +368,7 @@ def compute_for_team(team_name):
         today_matches = find_today_matches_for_team_from_cache(selected_can)
 
     if not today_matches:
-        return dict(result=f"{selected_can}의 오늘 경기를 찾지 못했습니다.",
+        return dict(result=f"오늘 {selected_can} 경기가 없습니다.",
                     avg_time=None, css_class="", msg="",
                     selected_team=selected_can, top30=top30, avg_ref=avg_ref, bottom70=bottom70)
 
