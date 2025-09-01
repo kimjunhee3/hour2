@@ -26,7 +26,7 @@ HISTORY_DAYS  = int(os.environ.get("HISTORY_DAYS", "45"))
 # 한 요청에서 리뷰 탭을 최대 몇 경기까지 열지(안전장치)
 MAX_REVIEW_PER_REQUEST = int(os.environ.get("MAX_REVIEW_PER_REQUEST", "60"))
 
-# ✅ 캐시만 사용 스위치(1이면 절대 크롤링하지 않음)
+# ✅ 캐시만 사용 스위치(기본 ON: 절대 크롤링하지 않음)
 USE_CACHE_ONLY = os.environ.get("USE_CACHE_ONLY", "1") == "1"
 
 # ====== 팀 별칭 → 정규화 매핑 ======
@@ -105,6 +105,15 @@ def _file_info(path):
         "path": os.path.abspath(path),
     }
 
+# ====== 날짜 유틸 ======
+def _asof_or_today(asof: str | None = None) -> str:
+    """YYYYMMDD 문자열(asof)이 오면 그걸, 없으면 오늘 날짜 반환"""
+    if asof:
+        x = asof.strip().replace("-", "")
+        datetime.strptime(x, "%Y%m%d")
+        return x
+    return datetime.today().strftime("%Y%m%d")
+
 # ====== 메모리 캐시(부팅 시 1회 로드) ======
 RUNTIME_MEM = None
 SCHEDULE_MEM = None
@@ -115,7 +124,7 @@ def _warm_cache_from_seed_if_empty():
 
     # 런타임(실측 시간 캐시)
     RUNTIME_MEM = _safe_json_load(RUNTIME_CACHE_FILE, None)
-    # ✅ 빈 dict도 비어있음으로 간주해 씨드로 보충
+    # ✅ 빈 dict도 씨드로 대체
     if not isinstance(RUNTIME_MEM, dict) or not RUNTIME_MEM:
         seedp = _first_existing(SEED_RUNTIME_CANDIDATES)
         RUNTIME_MEM = _safe_json_load(seedp, {})
@@ -123,7 +132,7 @@ def _warm_cache_from_seed_if_empty():
 
     # 스케줄(일자→경기 목록)
     SCHEDULE_MEM = _safe_json_load(SCHEDULE_CACHE_FILE, None)
-    # ✅ 빈 dict도 비어있음으로 간주해 씨드로 보충
+    # ✅ 빈 dict도 씨드로 대체
     if not isinstance(SCHEDULE_MEM, dict) or not SCHEDULE_MEM:
         seedp = _first_existing(SEED_SCHEDULE_CANDIDATES)
         SCHEDULE_MEM = _safe_json_load(seedp, {})
@@ -146,7 +155,7 @@ def set_schedule_cache_for_date(date_str, games_minimal_list):
 def make_runtime_key(game_id: str, game_date: str) -> str:
     return f"{game_id}_{game_date}"
 
-# ====== Selenium ======
+# ====== Selenium (캐시 전용 모드에선 호출되지 않음) ======
 def make_driver():
     options = Options()
     options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/google-chrome")
@@ -192,7 +201,7 @@ def get_games_for_date(driver, date_str):
         set_schedule_cache_for_date(date_str, [])
         return []
 
-    wait = WebDriverWait(driver, 8)  # timeout 단축
+    wait = WebDriverWait(driver, 8)
     url = f"https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={date_str}"
     driver.get(url)
     try:
@@ -229,10 +238,10 @@ def ensure_schedule_for_dates(dates):
         try: d.quit()
         except: pass
 
-# ====== 오늘 매치업: 캐시 우선 (당일만 보충) ======
-def find_today_matches_for_team_from_cache(my_team):
+# ====== 오늘(또는 as-of) 매치업: 캐시에서만 조회 ======
+def find_today_matches_for_team_from_cache(my_team, date_str: str | None = None):
     my_can = canon_team(my_team)
-    today = datetime.today().strftime("%Y%m%d")
+    today = _asof_or_today(date_str)
     games = SCHEDULE_MEM.get(today, [])
     results = []
     for g in games:
@@ -254,11 +263,11 @@ def open_review_and_get_runtime(driver, game_id, game_date):
         if hit and "runtime_min" in hit:
             return hit["runtime_min"]
 
-    # ✅ 캐시 전용 모드면 여기서도 크롤링 금지
+    # ✅ 캐시 전용 모드면 크롤링 금지
     if USE_CACHE_ONLY:
         return None
 
-    wait = WebDriverWait(driver, 8)  # timeout 단축
+    wait = WebDriverWait(driver, 8)
     base = f"https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameId={game_id}&gameDate={game_date}"
     driver.get(base)
     try:
@@ -305,17 +314,19 @@ def _last_n_days_list(n: int, end_date_yyyymmdd: str | None = None):
     return [dt.strftime("%Y%m%d") for dt in pd.date_range(start=start_dt, end=end_dt)]
 
 # ====== 평균 계산 (캐시 우선, 부족분은 건너뛰기) ======
-def collect_history_avg_runtime(my_team, rival_set, start_date=START_DATE):
+def collect_history_avg_runtime(my_team, rival_set, start_date=START_DATE, asof: str | None = None):
     my_can = canon_team(my_team)
-    yesterday = (datetime.today() - timedelta(days=1)).strftime("%Y%m%d")
+    ref = _asof_or_today(asof)
+    # as-of의 전날까지 평균을 계산
+    ref_yesterday_dt = datetime.strptime(ref, "%Y%m%d") - timedelta(days=1)
+    yesterday = ref_yesterday_dt.strftime("%Y%m%d")
 
-    # 우선: 씨드/런타임 캐시에 이미 들어있는 날짜 위주로 조회
+    # 날짜 풀 만들기 (as-of에 맞춰)
     if SCHEDULE_MEM:
         date_pool = set(_daterange_list(start_date, yesterday))
         dates = sorted(list(date_pool.intersection(set(SCHEDULE_MEM.keys()))))
         if not dates:
             dates = _last_n_days_list(HISTORY_DAYS, yesterday)
-            # ✅ 캐시 전용 모드면 보충 크롤링 금지
             if not USE_CACHE_ONLY:
                 ensure_schedule_for_dates(dates)
     else:
@@ -323,7 +334,7 @@ def collect_history_avg_runtime(my_team, rival_set, start_date=START_DATE):
         if not USE_CACHE_ONLY:
             ensure_schedule_for_dates(dates)
 
-    # 1) 스케줄 캐시에서 대상 경기 수집
+    # 1) 대상 경기 수집
     targets = []
     rival_norm_set = {canon_team(x) for x in (rival_set or [])} if rival_set else None
     for d in dates:
@@ -336,13 +347,12 @@ def collect_history_avg_runtime(my_team, rival_set, start_date=START_DATE):
                 continue
             targets.append(g)
 
-    # 2) 런타임 캐시 먼저, 없으면 'missing'
+    # 2) 런타임 캐시 우선
     run_times, missing = [], []
-    today_str = datetime.today().strftime("%Y%m%d")
     for g in targets:
         key = make_runtime_key(g["g_id"], g["g_dt"])
         hit = RUNTIME_MEM.get(key)
-        if g["g_dt"] != today_str and hit and "runtime_min" in hit:
+        if hit and "runtime_min" in hit:
             run_times.append(hit["runtime_min"])
         else:
             missing.append(g)
@@ -351,15 +361,10 @@ def collect_history_avg_runtime(my_team, rival_set, start_date=START_DATE):
     if missing:
         # ✅ 캐시 전용 모드면 보충하지 않고 건너뜀
         if USE_CACHE_ONLY:
-            if run_times:
-                return round(sum(run_times) / len(run_times), 1), run_times
-            else:
-                return None, []
-
-        # (크롤링 허용 모드일 때만) 상한 적용 + 보충
+            return (round(sum(run_times)/len(run_times), 1), run_times) if run_times else (None, [])
+        # (크롤링 허용일 때만) 보충
         if len(missing) > MAX_REVIEW_PER_REQUEST:
             missing = missing[:MAX_REVIEW_PER_REQUEST]
-
         d = make_driver()
         try:
             need_dates = sorted({g["g_dt"] for g in missing if g.get("g_dt")})
@@ -377,24 +382,26 @@ def collect_history_avg_runtime(my_team, rival_set, start_date=START_DATE):
     return None, []
 
 # ====== 공통 처리 ======
-def compute_for_team(team_name):
+def compute_for_team(team_name, asof: str | None = None):
     if not team_name:
         return dict(result="팀을 선택해주세요.", avg_time=None, css_class="", msg="",
                     selected_team=None, top30=top30, avg_ref=avg_ref, bottom70=bottom70)
 
     selected_can = canon_team(team_name)
+    ref = _asof_or_today(asof)
 
-    # 오늘 매치업: 캐시 우선 → 없으면 '당일만' 보충
-    today_matches = find_today_matches_for_team_from_cache(selected_can)
+    # as-of 날짜의 매치업을 캐시에서 찾기
+    today_matches = find_today_matches_for_team_from_cache(selected_can, ref)
+
     if not today_matches:
-        # ✅ 캐시 전용 모드면 보충하지 않고 바로 "없음"
+        # 캐시 전용이 아니고, 캐시에 ref가 없으면 보충 시도
         if not USE_CACHE_ONLY:
-            today = datetime.today().strftime("%Y%m%d")
-            ensure_schedule_for_dates([today])
-            today_matches = find_today_matches_for_team_from_cache(selected_can)
+            ensure_schedule_for_dates([ref])
+            today_matches = find_today_matches_for_team_from_cache(selected_can, ref)
 
     if not today_matches:
-        return dict(result=f"오늘 {selected_can} 경기가 없습니다.",
+        # 문구: as-of 날짜 기준으로 통일
+        return dict(result=f"{selected_can}의 {ref} 경기 정보가 없습니다.",
                     avg_time=None, css_class="", msg="",
                     selected_team=selected_can, top30=top30, avg_ref=avg_ref, bottom70=bottom70)
 
@@ -402,7 +409,7 @@ def compute_for_team(team_name):
     rivals_str = ", ".join(sorted(rivals_today)) if rivals_today else ""
 
     try:
-        avg_time, _ = collect_history_avg_runtime(selected_can, rivals_today)
+        avg_time, _ = collect_history_avg_runtime(selected_can, rivals_today, start_date=START_DATE, asof=ref)
     except Exception:
         avg_time = None
 
@@ -412,10 +419,10 @@ def compute_for_team(team_name):
         elif avg_time < avg_ref:    css_class, msg = "normal", "일반적인 경기 소요 시간입니다"
         elif avg_time < bottom70:   css_class, msg = "bit-long", "조금 긴 편이에요"
         else:                       css_class, msg = "long", "시간 오래 걸리는 매치업입니다"
-        result = f"오늘 {selected_can}의 상대팀은 {rivals_str}입니다.<br>과거 {selected_can} vs {rivals_str} 평균 경기시간: {avg_time}분"
+        result = f"{ref} {selected_can}의 상대팀은 {rivals_str}입니다.<br>과거 {selected_can} vs {rivals_str} 평균 경기시간: {avg_time}분"
     else:
-        # ✅ 캐시 전용일 때 평균이 없으면 문구 통일
-        result = f"오늘 {selected_can} 경기가 없습니다."
+        # 평균이 없으면 문구 통일(요청사항 반영)
+        result = f"{ref} {selected_can} 경기가 없습니다."
 
     return dict(result=result, avg_time=avg_time, css_class=css_class, msg=msg,
                 selected_team=selected_can, top30=top30, avg_ref=avg_ref, bottom70=bottom70)
@@ -426,7 +433,8 @@ def compute_for_team(team_name):
 def hour_index():
     try:
         team = (request.args.get("myteam") or request.form.get("myteam") or "").strip()
-        ctx = compute_for_team(team) if team else dict(
+        asof = (request.args.get("asof") or request.form.get("asof") or "").strip() or None  # ✅ 추가
+        ctx = compute_for_team(team, asof=asof) if team else dict(
             result=None, avg_time=None, css_class="", msg="",
             selected_team=None, top30=top30, avg_ref=avg_ref, bottom70=bottom70
         )
@@ -459,7 +467,7 @@ def cache_status():
             "START_DATE": START_DATE,
             "HISTORY_DAYS": HISTORY_DAYS,
             "MAX_REVIEW_PER_REQUEST": MAX_REVIEW_PER_REQUEST,
-            "USE_CACHE_ONLY": USE_CACHE_ONLY,  # ✅ 노출
+            "USE_CACHE_ONLY": USE_CACHE_ONLY,
         }
     })
 
