@@ -90,7 +90,7 @@
                 <div class="comment">{{ msg }}</div>
                 <div style="font-size:10px; color:#888;">기준: 속전({{ top30 }}분 미만) / 평균({{ top30 }}-{{ avg_ref }}분) / 초과({{ avg_ref }}분 이상)</div>
             {% else %}
-                <div class="avg-info">과거 경기 데이터가 없습니다.</div>
+                <div class="avg-info">{{ result|safe }}</div>
             {% endif %}
         </div>
         {% endif %}
