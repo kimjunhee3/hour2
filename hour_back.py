@@ -1,3 +1,4 @@
+#hour_back.py
 from flask import Flask, request, render_template, jsonify, make_response
 import os, json, time, re, io, zipfile
 from datetime import datetime, timedelta
@@ -19,6 +20,10 @@ bottom70= 194
 
 # 평균 집계 시작일(문자열: YYYY-MM-DD 또는 YYYYMMDD)
 START_DATE = os.environ.get("START_DATE", "2025-03-22")
+
+# ⬇️ 추가: 화면에 보여줄 기준 날짜를 강제로 고정 (빈 문자열이면 비활성화)
+# 항상 9/20을 쓰고 싶다면 기본값을 "20250920"으로 둡니다.
+FORCE_ASOF = os.environ.get("FORCE_ASOF", "20250920")
 
 # 씨드가 비어있을 때 최초 보충은 최근 N일만(너무 멀리 과거까지 한 번에 긁지 않도록)
 HISTORY_DAYS  = int(os.environ.get("HISTORY_DAYS", "45"))
@@ -108,6 +113,9 @@ def _file_info(path):
 # ====== 날짜 유틸 ======
 def _asof_or_today(asof: str | None = None) -> str:
     """YYYYMMDD 문자열(asof)이 오면 그걸, 없으면 오늘 날짜 반환"""
+    # ⬇️ 추가: 고정 as-of가 설정돼 있으면 무조건 그 날짜를 사용
+    if FORCE_ASOF:
+        return FORCE_ASOF
     if asof:
         x = asof.strip().replace("-", "")
         datetime.strptime(x, "%Y%m%d")
@@ -435,8 +443,12 @@ def compute_for_team(team_name, asof: str | None = None):
 def hour_index():
     try:
         team = (request.args.get("myteam") or request.form.get("myteam") or "").strip()
-        asof = (request.args.get("asof") or request.form.get("asof") or "").strip() or None  # ✅ 추가
-        ctx = compute_for_team(team, asof=asof) if team else dict(
+        asof = (request.args.get("asof") or request.form.get("asof") or "").strip() or None  # 원래 파라미터
+
+        # ⬇️ 확실하게 9/20 고정 동작을 원한다면, asof를 강제로 덮어씁니다.
+        use_asof = FORCE_ASOF or asof
+
+        ctx = compute_for_team(team, asof=use_asof) if team else dict(
             result=None, avg_time=None, css_class="", msg="",
             selected_team=None, top30=top30, avg_ref=avg_ref, bottom70=bottom70
         )
@@ -470,6 +482,7 @@ def cache_status():
             "HISTORY_DAYS": HISTORY_DAYS,
             "MAX_REVIEW_PER_REQUEST": MAX_REVIEW_PER_REQUEST,
             "USE_CACHE_ONLY": USE_CACHE_ONLY,
+            "FORCE_ASOF": FORCE_ASOF,
         }
     })
 
